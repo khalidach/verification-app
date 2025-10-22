@@ -2,7 +2,7 @@
   "name": "verification-service-supabase",
   "version": "1.0.0",
   "description": "Verification service using Supabase",
-  "main": "server.js",
+  "main": "netlify/functions/verify.js",
   "scripts": {
     "start": "node server.js"
   },
