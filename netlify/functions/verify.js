@@ -2,7 +2,6 @@
 
 // Load environment variables from .env file (for local testing)
 // On Netlify, variables are set in the UI (see Step 4)
-require("dotenv").config();
 
 const { createClient } = require("@supabase/supabase-js");
 
