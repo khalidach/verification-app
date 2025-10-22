@@ -1,0 +1,18 @@
+# netlify.toml
+
+[build]
+  # This tells Netlify to look for serverless functions
+  # in a folder named "netlify/functions"
+  functions = "netlify/functions"
+
+[[redirects]]
+  # This maps your desired API route to the function we will create.
+  # Requests to /api/verify...
+  from = "/api/verify"
+  # ...will be handled by the function at /.netlify/functions/verify
+  to = "/.netlify/functions/verify"
+  # This status code (200) "rewrites" the URL without
+  # the user knowing, perfect for an API.
+  status = 200
+  # This ensures POST, PUT, etc. methods are also forwarded.
+  force = true
