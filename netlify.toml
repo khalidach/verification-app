@@ -1,18 +1,11 @@
-# netlify.toml
-
+# This file tells Netlify how to build and deploy your site.
 [build]
-  # This tells Netlify to look for serverless functions
-  # in a folder named "netlify/functions"
+  # This is the directory where your serverless functions are located.
   functions = "netlify/functions"
 
+# This is a redirect rule to make your function accessible at a cleaner URL.
+# Instead of /.netlify/functions/verify, you can call /api/verify.
 [[redirects]]
-  # This maps your desired API route to the function we will create.
-  # Requests to /api/verify...
-  from = "/api/verify"
-  # ...will be handled by the function at /.netlify/functions/verify
-  to = "/.netlify/functions/verify"
-  # This status code (200) "rewrites" the URL without
-  # the user knowing, perfect for an API.
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
   status = 200
-  # This ensures POST, PUT, etc. methods are also forwarded.
-  force = true
