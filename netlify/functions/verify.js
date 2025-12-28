@@ -1,27 +1,50 @@
 // /netlify/functions/verify.js
 
-// Import the Supabase client library
-const { createClient } = require("@supabase/supabase-js");
+const { Pool } = require("pg");
 
-// The main handler for the Netlify serverless function.
+// Initialize the Postgres Pool using the connection string from environment variables
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false, // Required for Neon connections
+  },
+});
+
+/**
+ * Ensures the required table exists in the database.
+ * This runs on every cold start of the serverless function.
+ */
+async function initializeDatabase() {
+  const createTableQuery = `
+    CREATE TABLE IF NOT EXISTS license_codes (
+      id SERIAL PRIMARY KEY,
+      code TEXT UNIQUE NOT NULL,
+      is_used BOOLEAN DEFAULT false,
+      machine_id TEXT,
+      used_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+  `;
+  try {
+    await pool.query(createTableQuery);
+  } catch (err) {
+    console.error("Error initializing database table:", err);
+    throw err;
+  }
+}
+
 exports.handler = async function (event, context) {
-  // CORS headers to allow requests from your application
+  // CORS headers
   const headers = {
-    "Access-Control-Allow-Origin": "*", // Or lock down to your specific domain
+    "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
   };
 
-  // Handle pre-flight OPTIONS requests (for CORS)
   if (event.httpMethod === "OPTIONS") {
-    return {
-      statusCode: 204,
-      headers,
-      body: "",
-    };
+    return { statusCode: 204, headers, body: "" };
   }
 
-  // Ensure the request is a POST request
   if (event.httpMethod !== "POST") {
     return {
       statusCode: 405,
@@ -31,28 +54,9 @@ exports.handler = async function (event, context) {
   }
 
   try {
-    // --- 1. Initialize Supabase Client ---
-    // Get environment variables
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
+    // Ensure table exists before processing request
+    await initializeDatabase();
 
-    // Check if variables are set
-    if (!supabaseUrl || !supabaseAnonKey) {
-      console.error("Supabase URL or Anon Key is not set.");
-      return {
-        statusCode: 500,
-        headers,
-        body: JSON.stringify({
-          success: false,
-          message: "Server configuration error.",
-        }),
-      };
-    }
-    // Initialize the client
-    const supabase = createClient(supabaseUrl, supabaseAnonKey);
-
-    // --- 2. Get Code and Machine ID from Request ---
-    // We expect "licenseCode" (from your original logic) and "machineId" (from new logic)
     const { licenseCode, machineId } = JSON.parse(event.body);
 
     if (!licenseCode || !machineId) {
@@ -66,30 +70,18 @@ exports.handler = async function (event, context) {
       };
     }
 
-    // --- 3. Query Supabase for the Code ---
-    // We query your original "license_codes" table
-    // We must select all fields needed for the logic (id, is_used, machine_id)
-    const { data: codeData, error: selectError } = await supabase
-      .from("license_codes") // Using your original table name
-      .select("id, code, is_used, machine_id")
-      .eq("code", licenseCode.trim()) // Using your original field name "code"
-      .single();
+    // 1. Query the database for the license code
+    const selectQuery = `
+      SELECT id, code, is_used, machine_id 
+      FROM license_codes 
+      WHERE code = $1 
+      LIMIT 1
+    `;
 
-    // Handle errors during the select query
-    // PGRST116 means "No rows found", which we handle as "invalid code"
-    if (selectError && selectError.code !== "PGRST116") {
-      console.error("Supabase select error:", selectError);
-      return {
-        statusCode: 500,
-        headers,
-        body: JSON.stringify({
-          success: false,
-          message: "Database query failed.",
-        }),
-      };
-    }
+    const res = await pool.query(selectQuery, [licenseCode.trim()]);
+    const codeData = res.rows[0];
 
-    // If code doesn't exist at all (PGRST116 or no data)
+    // 2. If code doesn't exist
     if (!codeData) {
       return {
         statusCode: 404,
@@ -101,11 +93,10 @@ exports.handler = async function (event, context) {
       };
     }
 
-    // --- 4. Validate the Code (The new logic) ---
+    // 3. Logic Validation
     if (codeData.is_used) {
-      // If the code is used, check if it's for the same machine
+      // Check if it matches the current machine
       if (codeData.machine_id === machineId) {
-        // It's the same machine re-verifying, which is allowed.
         return {
           statusCode: 200,
           headers,
@@ -115,7 +106,6 @@ exports.handler = async function (event, context) {
           }),
         };
       } else {
-        // The code is used, but on a different machine. Deny access.
         return {
           statusCode: 403,
           headers,
@@ -126,30 +116,17 @@ exports.handler = async function (event, context) {
         };
       }
     } else {
-      // --- 5. First-Time Activation: Mark the Code as Used ---
-      // This is a new, unused code. We will activate it.
-      const { error: updateError } = await supabase
-        .from("license_codes") // Update your original table
-        .update({
-          is_used: true,
-          used_at: new Date().toISOString(),
-          machine_id: machineId, // Store the machine ID
-        })
-        .eq("id", codeData.id); // Match by its unique ID
+      // 4. First-time Activation
+      const updateQuery = `
+        UPDATE license_codes 
+        SET is_used = true, 
+            used_at = NOW(), 
+            machine_id = $1 
+        WHERE id = $2
+      `;
 
-      if (updateError) {
-        console.error("Supabase update error:", updateError);
-        return {
-          statusCode: 500,
-          headers,
-          body: JSON.stringify({
-            success: false,
-            message: "Failed to activate license.",
-          }),
-        };
-      }
+      await pool.query(updateQuery, [machineId, codeData.id]);
 
-      // --- 6. Return Success Response for First-Time Activation ---
       return {
         statusCode: 200,
         headers,
@@ -160,8 +137,7 @@ exports.handler = async function (event, context) {
       };
     }
   } catch (error) {
-    // Catch any unexpected errors (e.g., JSON parsing failed)
-    console.error("Unexpected server error:", error);
+    console.error("Database or Server Error:", error);
     return {
       statusCode: 500,
       headers,
