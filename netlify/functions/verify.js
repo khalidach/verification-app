@@ -1,36 +1,51 @@
 // /netlify/functions/verify.js
 const { Pool } = require("pg");
-const crypto = require("crypto"); // Added for signing
+const crypto = require("crypto");
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  ssl: {
+    rejectUnauthorized: false,
+    // Fix for the pg-connection-string warning in your logs
+    sslmode: "verify-full",
+  },
 });
 
-// Load the Private Key from Netlify Environment Variables
-// Ensure you use \n for newlines if you store it as a single string
-const PRIVATE_KEY = process.env.LICENSE_PRIVATE_KEY;
-
 /**
- * Signs the response payload to prevent tampering.
- * The payload includes the machineId to bind the response to a specific device.
+ * Fixes the private key formatting.
+ * Environment variables often escape newlines as "\n".
  */
+const getFormattedKey = (key) => {
+  if (!key) return null;
+  // Replace literal '\n' strings with actual newline characters
+  return key.replace(/\\n/g, "\n");
+};
+
+const PRIVATE_KEY = getFormattedKey(process.env.LICENSE_PRIVATE_KEY);
+
 function signResponse(success, message, machineId) {
   if (!PRIVATE_KEY) {
-    console.error("Missing LICENSE_PRIVATE_KEY environment variable.");
+    console.error(
+      "Missing or malformed LICENSE_PRIVATE_KEY environment variable.",
+    );
     return null;
   }
 
-  // This string must EXACTLY match the reconstruction in main.js
   const payload = JSON.stringify({
     success,
     message,
     machineId,
   });
 
-  const signer = crypto.createSign("SHA256");
-  signer.update(payload);
-  return signer.sign(PRIVATE_KEY, "base64");
+  try {
+    const signer = crypto.createSign("SHA256");
+    signer.update(payload);
+    // The error was happening here because PRIVATE_KEY was likely a flat string
+    return signer.sign(PRIVATE_KEY, "base64");
+  } catch (err) {
+    console.error("Signing Error:", err.message);
+    return null;
+  }
 }
 
 async function initializeDatabase() {
@@ -61,6 +76,7 @@ exports.handler = async function (event, context) {
 
   if (event.httpMethod === "OPTIONS")
     return { statusCode: 204, headers, body: "" };
+
   if (event.httpMethod !== "POST") {
     return {
       statusCode: 405,
@@ -97,7 +113,7 @@ exports.handler = async function (event, context) {
         body: JSON.stringify({
           success: false,
           message: msg,
-          signature: signResponse(false, msg, machineId), // Sign even failures
+          signature: signResponse(false, msg, machineId),
         }),
       };
     }
