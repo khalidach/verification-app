@@ -6,28 +6,20 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
     rejectUnauthorized: false,
-    // Fix for the pg-connection-string warning in your logs
     sslmode: "verify-full",
   },
 });
 
-/**
- * Fixes the private key formatting.
- * Environment variables often escape newlines as "\n".
- */
 const getFormattedKey = (key) => {
   if (!key) return null;
-  // Replace literal '\n' strings with actual newline characters
   return key.replace(/\\n/g, "\n");
 };
 
 const PRIVATE_KEY = getFormattedKey(process.env.LICENSE_PRIVATE_KEY);
 
-function signResponse(success, message, machineId) {
+function signResponse(success, message, machineId, isTrial = false) {
   if (!PRIVATE_KEY) {
-    console.error(
-      "Missing or malformed LICENSE_PRIVATE_KEY environment variable.",
-    );
+    console.error("Missing LICENSE_PRIVATE_KEY");
     return null;
   }
 
@@ -35,12 +27,12 @@ function signResponse(success, message, machineId) {
     success,
     message,
     machineId,
+    isTrial, // Include trial status in signature for client-side security
   });
 
   try {
     const signer = crypto.createSign("SHA256");
     signer.update(payload);
-    // The error was happening here because PRIVATE_KEY was likely a flat string
     return signer.sign(PRIVATE_KEY, "base64");
   } catch (err) {
     console.error("Signing Error:", err.message);
@@ -56,7 +48,9 @@ async function initializeDatabase() {
       is_used BOOLEAN DEFAULT false,
       machine_id TEXT,
       used_at TIMESTAMP,
-      created_at TIMESTAMP DEFAULT NOW()
+      created_at TIMESTAMP DEFAULT NOW(),
+      is_trial BOOLEAN DEFAULT false,
+      trial_expires_at TIMESTAMP
     );
   `;
   try {
@@ -76,7 +70,6 @@ exports.handler = async function (event, context) {
 
   if (event.httpMethod === "OPTIONS")
     return { statusCode: 204, headers, body: "" };
-
   if (event.httpMethod !== "POST") {
     return {
       statusCode: 405,
@@ -95,12 +88,12 @@ exports.handler = async function (event, context) {
         headers,
         body: JSON.stringify({
           success: false,
-          message: "License code and machine ID are required.",
+          message: "License code and machine ID required.",
         }),
       };
     }
 
-    const selectQuery = `SELECT id, code, is_used, machine_id FROM license_codes WHERE code = $1 LIMIT 1`;
+    const selectQuery = `SELECT * FROM license_codes WHERE code = $1 LIMIT 1`;
     const res = await pool.query(selectQuery, [licenseCode.trim()]);
     const codeData = res.rows[0];
 
@@ -118,21 +111,10 @@ exports.handler = async function (event, context) {
       };
     }
 
-    // 2. Already Activated
+    // 2. Handle Already Activated/Used Codes
     if (codeData.is_used) {
-      if (codeData.machine_id === machineId) {
-        const msg = "License verified successfully.";
-        return {
-          statusCode: 200,
-          headers,
-          body: JSON.stringify({
-            success: true,
-            message: msg,
-            signature: signResponse(true, msg, machineId),
-          }),
-        };
-      } else {
-        const msg = "This license has already been used on another computer.";
+      if (codeData.machine_id !== machineId) {
+        const msg = "This license is already used on another device.";
         return {
           statusCode: 403,
           headers,
@@ -143,20 +125,78 @@ exports.handler = async function (event, context) {
           }),
         };
       }
+
+      // Check if it's a trial code and if it expired
+      if (codeData.is_trial) {
+        const now = new Date();
+        const expiry = new Date(codeData.trial_expires_at);
+
+        if (now > expiry) {
+          const msg =
+            "Trial period has expired. Please upgrade to a lifetime license.";
+          return {
+            statusCode: 402, // Payment Required / Expired
+            headers,
+            body: JSON.stringify({
+              success: false,
+              message: msg,
+              signature: signResponse(false, msg, machineId, true),
+            }),
+          };
+        } else {
+          const msg = `Trial active. Expires in ${Math.round((expiry - now) / 36e5)} hours.`;
+          return {
+            statusCode: 200,
+            headers,
+            body: JSON.stringify({
+              success: true,
+              message: msg,
+              signature: signResponse(true, msg, machineId, true),
+            }),
+          };
+        }
+      }
+
+      // Lifetime license check
+      const msg = "License verified successfully.";
+      return {
+        statusCode: 200,
+        headers,
+        body: JSON.stringify({
+          success: true,
+          message: msg,
+          signature: signResponse(true, msg, machineId, false),
+        }),
+      };
     }
 
-    // 3. New Activation
-    const updateQuery = `UPDATE license_codes SET is_used = true, used_at = NOW(), machine_id = $1 WHERE id = $2`;
-    await pool.query(updateQuery, [machineId, codeData.id]);
+    // 3. New Activation Logic
+    // If the code starts with 'TRIAL-', we set expiration to 24 hours from now
+    const isTrialCode = codeData.code.startsWith("TRIAL-");
+    const trialExpiry = isTrialCode ? "NOW() + INTERVAL '1 day'" : "NULL";
 
-    const msg = "Application activated successfully.";
+    const updateQuery = `
+      UPDATE license_codes 
+      SET is_used = true, 
+          used_at = NOW(), 
+          machine_id = $1, 
+          is_trial = $2, 
+          trial_expires_at = ${trialExpiry} 
+      WHERE id = $3
+    `;
+
+    await pool.query(updateQuery, [machineId, isTrialCode, codeData.id]);
+
+    const msg = isTrialCode
+      ? "Trial activated for 24 hours."
+      : "Lifetime license activated successfully.";
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
         success: true,
         message: msg,
-        signature: signResponse(true, msg, machineId),
+        signature: signResponse(true, msg, machineId, isTrialCode),
       }),
     };
   } catch (error) {
@@ -164,10 +204,7 @@ exports.handler = async function (event, context) {
     return {
       statusCode: 500,
       headers,
-      body: JSON.stringify({
-        success: false,
-        message: "An unexpected error occurred.",
-      }),
+      body: JSON.stringify({ success: false, message: "Server error." }),
     };
   }
 };
