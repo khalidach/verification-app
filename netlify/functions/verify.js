@@ -38,7 +38,7 @@ function signResponse(
     message,
     machineId,
     isTrial,
-    expiryDate, // Added to signature for security
+    expiryDate,
   });
 
   try {
@@ -51,21 +51,27 @@ function signResponse(
   }
 }
 
+/**
+ * Ensures the table exists and contains the necessary trial columns.
+ */
 async function initializeDatabase() {
-  const createTableQuery = `
+  const query = `
+    -- 1. Create the table if it doesn't exist
     CREATE TABLE IF NOT EXISTS license_codes (
       id SERIAL PRIMARY KEY,
       code TEXT UNIQUE NOT NULL,
       is_used BOOLEAN DEFAULT false,
       machine_id TEXT,
       used_at TIMESTAMP,
-      created_at TIMESTAMP DEFAULT NOW(),
-      is_trial BOOLEAN DEFAULT false,
-      trial_expires_at TIMESTAMP
+      created_at TIMESTAMP DEFAULT NOW()
     );
+
+    -- 2. Add trial columns if they are missing from an existing table
+    ALTER TABLE license_codes ADD COLUMN IF NOT EXISTS is_trial BOOLEAN DEFAULT false;
+    ALTER TABLE license_codes ADD COLUMN IF NOT EXISTS trial_expires_at TIMESTAMP;
   `;
   try {
-    await pool.query(createTableQuery);
+    await pool.query(query);
   } catch (err) {
     console.error("Database initialization error:", err);
     throw err;
@@ -138,7 +144,6 @@ exports.handler = async function (event, context) {
         };
       }
 
-      // Check if it's a trial code and if it expired
       if (codeData.is_trial) {
         const now = new Date();
         const expiry = new Date(codeData.trial_expires_at);
@@ -164,7 +169,7 @@ exports.handler = async function (event, context) {
             }),
           };
         } else {
-          const hoursLeft = Math.round((expiry - now) / 36e5);
+          const hoursLeft = Math.max(0, Math.round((expiry - now) / 36e5));
           const msg = `Trial active. Expires in ${hoursLeft} hours.`;
           return {
             statusCode: 200,
@@ -186,7 +191,6 @@ exports.handler = async function (event, context) {
         }
       }
 
-      // Lifetime license check
       const msg = "License verified successfully.";
       return {
         statusCode: 200,
@@ -204,7 +208,7 @@ exports.handler = async function (event, context) {
     // 3. New Activation Logic
     const isTrialCode = codeData.code.startsWith("TRIAL-");
 
-    // Calculate expiry locally for the response signature
+    // Calculate expiry locally (24 hours for trial)
     const expiryDateValue = isTrialCode
       ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
       : null;
