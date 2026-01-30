@@ -17,7 +17,17 @@ const getFormattedKey = (key) => {
 
 const PRIVATE_KEY = getFormattedKey(process.env.LICENSE_PRIVATE_KEY);
 
-function signResponse(success, message, machineId, isTrial = false) {
+/**
+ * Signs the response payload to prevent client-side tampering.
+ * Includes expiryDate and isTrial status in the signature.
+ */
+function signResponse(
+  success,
+  message,
+  machineId,
+  isTrial = false,
+  expiryDate = null,
+) {
   if (!PRIVATE_KEY) {
     console.error("Missing LICENSE_PRIVATE_KEY");
     return null;
@@ -27,7 +37,8 @@ function signResponse(success, message, machineId, isTrial = false) {
     success,
     message,
     machineId,
-    isTrial, // Include trial status in signature for client-side security
+    isTrial,
+    expiryDate, // Added to signature for security
   });
 
   try {
@@ -70,6 +81,7 @@ exports.handler = async function (event, context) {
 
   if (event.httpMethod === "OPTIONS")
     return { statusCode: 204, headers, body: "" };
+
   if (event.httpMethod !== "POST") {
     return {
       statusCode: 405,
@@ -135,23 +147,40 @@ exports.handler = async function (event, context) {
           const msg =
             "Trial period has expired. Please upgrade to a lifetime license.";
           return {
-            statusCode: 402, // Payment Required / Expired
+            statusCode: 402,
             headers,
             body: JSON.stringify({
               success: false,
               message: msg,
-              signature: signResponse(false, msg, machineId, true),
+              isTrial: true,
+              expiryDate: expiry.toISOString(),
+              signature: signResponse(
+                false,
+                msg,
+                machineId,
+                true,
+                expiry.toISOString(),
+              ),
             }),
           };
         } else {
-          const msg = `Trial active. Expires in ${Math.round((expiry - now) / 36e5)} hours.`;
+          const hoursLeft = Math.round((expiry - now) / 36e5);
+          const msg = `Trial active. Expires in ${hoursLeft} hours.`;
           return {
             statusCode: 200,
             headers,
             body: JSON.stringify({
               success: true,
               message: msg,
-              signature: signResponse(true, msg, machineId, true),
+              isTrial: true,
+              expiryDate: expiry.toISOString(),
+              signature: signResponse(
+                true,
+                msg,
+                machineId,
+                true,
+                expiry.toISOString(),
+              ),
             }),
           };
         }
@@ -165,15 +194,22 @@ exports.handler = async function (event, context) {
         body: JSON.stringify({
           success: true,
           message: msg,
-          signature: signResponse(true, msg, machineId, false),
+          isTrial: false,
+          expiryDate: null,
+          signature: signResponse(true, msg, machineId, false, null),
         }),
       };
     }
 
     // 3. New Activation Logic
-    // If the code starts with 'TRIAL-', we set expiration to 24 hours from now
     const isTrialCode = codeData.code.startsWith("TRIAL-");
-    const trialExpiry = isTrialCode ? "NOW() + INTERVAL '1 day'" : "NULL";
+
+    // Calculate expiry locally for the response signature
+    const expiryDateValue = isTrialCode
+      ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+      : null;
+
+    const trialExpirySql = isTrialCode ? "NOW() + INTERVAL '1 day'" : "NULL";
 
     const updateQuery = `
       UPDATE license_codes 
@@ -181,7 +217,7 @@ exports.handler = async function (event, context) {
           used_at = NOW(), 
           machine_id = $1, 
           is_trial = $2, 
-          trial_expires_at = ${trialExpiry} 
+          trial_expires_at = ${trialExpirySql} 
       WHERE id = $3
     `;
 
@@ -190,13 +226,22 @@ exports.handler = async function (event, context) {
     const msg = isTrialCode
       ? "Trial activated for 24 hours."
       : "Lifetime license activated successfully.";
+
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
         success: true,
         message: msg,
-        signature: signResponse(true, msg, machineId, isTrialCode),
+        isTrial: isTrialCode,
+        expiryDate: expiryDateValue,
+        signature: signResponse(
+          true,
+          msg,
+          machineId,
+          isTrialCode,
+          expiryDateValue,
+        ),
       }),
     };
   } catch (error) {
