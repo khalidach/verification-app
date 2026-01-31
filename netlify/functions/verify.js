@@ -169,9 +169,8 @@ exports.handler = async function (event, context) {
             }),
           };
         } else {
-          // Changed to minutes for testing
-          const minutesLeft = Math.max(0, Math.round((expiry - now) / 60000));
-          const msg = `Trial active. Expires in ${minutesLeft} minutes.`;
+          const hoursLeft = Math.max(0, Math.round((expiry - now) / 36e5));
+          const msg = `Trial active. Expires in ${hoursLeft} hours.`;
           return {
             statusCode: 200,
             headers,
@@ -209,15 +208,12 @@ exports.handler = async function (event, context) {
     // 3. New Activation Logic
     const isTrialCode = codeData.code.startsWith("TRIAL-");
 
-    // Calculate expiry locally (10 minutes for testing)
+    // Calculate expiry locally (24 hours for trial)
     const expiryDateValue = isTrialCode
-      ? new Date(Date.now() + 10 * 60 * 1000).toISOString()
+      ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
       : null;
 
-    // Changed INTERVAL '1 day' to '10 minutes'
-    const trialExpirySql = isTrialCode
-      ? "NOW() + INTERVAL '10 minutes'"
-      : "NULL";
+    const trialExpirySql = isTrialCode ? "NOW() + INTERVAL '1 day'" : "NULL";
 
     const updateQuery = `
       UPDATE license_codes 
@@ -232,7 +228,7 @@ exports.handler = async function (event, context) {
     await pool.query(updateQuery, [machineId, isTrialCode, codeData.id]);
 
     const msg = isTrialCode
-      ? "Trial activated for 10 minutes."
+      ? "Trial activated for 24 hours."
       : "Lifetime license activated successfully.";
 
     return {
