@@ -12,7 +12,31 @@ const pool = new Pool({
 
 const getFormattedKey = (key) => {
   if (!key) return null;
-  return key.replace(/\\n/g, "\n");
+
+  // If it's already got newlines, return it as is
+  if (key.includes("\n")) {
+    return key;
+  }
+
+  // Handle literal "\n" strings
+  let formatted = key.replace(/\\n/g, "\n");
+  if (formatted.includes("\n")) {
+    return formatted;
+  }
+
+  // If it has spaces (like "-----BEGIN PRIVATE KEY----- MIIEv... -----END PRIVATE KEY-----")
+  const header = "-----BEGIN PRIVATE KEY-----";
+  const footer = "-----END PRIVATE KEY-----";
+
+  if (formatted.startsWith(header) && formatted.endsWith(footer)) {
+    // Extract base64 body in the middle
+    let body = formatted.substring(header.length, formatted.length - footer.length).trim();
+    // Replace all spacing with newlines
+    body = body.split(/\s+/).join("\n");
+    return `${header}\n${body}\n${footer}`;
+  }
+
+  return formatted;
 };
 
 const PRIVATE_KEY = getFormattedKey(process.env.LICENSE_PRIVATE_KEY);
